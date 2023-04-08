@@ -13,6 +13,12 @@ def write_csv_file(output_file, result):
             f.writelines(str(row[0]) + ', ' + str(row[1]) + '\n')
     return
 
+def write_communities(output_file, best_graph):
+    with open(output_file, "w") as f:
+        for community in best_graph:
+            f.write(str(community)[1:-1] + "\n")
+
+
 def build_tree(graph, root):
     visited = set()
     tree = dict()
@@ -125,6 +131,70 @@ def calculate_betweeness(vertex, graph):
     # return bet
     return edge_credits
 
+def calculate_modularity(vertices, betweenness):
+    mod = 0
+    node_pairs = (list(combinations(vertices, 2)))
+    for node_pair in node_pairs:
+        node_pair = tuple(sorted(node_pair))
+        A = 1 if node_pair in betweenness else 0
+        k_i = degree[node_pair[0]]
+        k_j = degree[node_pair[1]]
+
+        mod += (A - (k_i * k_j)/(2*M))
+    return mod
+
+def find_all_subgraphs(graph):
+    subgraphs = list()
+    visited = set()
+    vertices = list(graph.keys())
+    
+    for vertex in vertices:
+        if vertex not in visited:
+            curr_subgraph = list()
+            queue = [vertex]     
+            while queue:
+                curr_node = queue.pop(0)
+                if curr_node not in visited:
+                    curr_subgraph.append(curr_node)
+
+                    neighbors = graph[curr_node]
+
+                    for neighbor in neighbors:
+                        if neighbor not in visited:
+                            queue.append(neighbor)
+
+                visited.add(curr_node)
+            
+            subgraphs.append(curr_subgraph)
+    
+    return subgraphs
+
+
+def get_subgraphs(graph):
+    visited = set()
+    vertices = list(graph.keys()) 
+    all_subgraphs = list()
+     
+    for vertex in vertices:
+        if vertex not in visited:
+            queue = [vertex]
+            curr_subgraph = list()
+            while queue:
+                curr_node = queue.pop(0)
+                if curr_node not in visited:
+                    curr_subgraph.append(curr_node)
+
+                    neighbors = graph[curr_node]
+
+                    for neighbor in neighbors:
+                        if neighbor not in visited:
+                            queue.append(neighbor)
+                visited.add(curr_node)
+
+            all_subgraphs.append(curr_subgraph)
+    
+    return subgraphs
+
 def build_graph(edges):
     graph = defaultdict(set)
     for edge1, edge2 in edges:
@@ -136,15 +206,15 @@ if __name__ == "__main__":
     sc = SparkContext()
     sc.setLogLevel("ERROR")
 
-    # filter_threshold = int(sys.argv[1])
-    # input_file = sys.argv[2]
-    # betweenness_output_file = sys.argv[3]
-    # community_output_file = sys.argv[4]
+    filter_threshold = int(sys.argv[1])
+    input_file = sys.argv[2]
+    betweenness_output_file = sys.argv[3]
+    community_output_file = sys.argv[4]
 
-    filter_threshold = 7
-    input_file = "data/ub_sample_data.csv"
-    betweenness_output_file = "result/task2_1.txt"
-    community_output_file = "result/task2_2.txt"
+    # filter_threshold = 7
+    # input_file = "data/ub_sample_data.csv"
+    # betweenness_output_file = "result/task2_1.txt"
+    # community_output_file = "result/task2_2.txt"
 
 
     data_RDD = sc.textFile(input_file)
@@ -220,10 +290,51 @@ if __name__ == "__main__":
 
     write_csv_file(betweenness_output_file, betweenness_output)
 
-    #TODO: Calculate Betweenness between 2 edges of the graph
+    #TODO: Detect Communities
+
+    M = len(betweenness_output)
+    degree = {node: len(graph[node]) for node in graph}
+    max_modularity = -float('inf')
+    #calculate modularity for the original graph
+
+    adjacency_list_RDD = sc.parallelize(list(graph))
+
+    betweenness = adjacency_list_RDD.flatMap(lambda node: calculate_betweeness(node, graph)).reduceByKey(lambda x, y: x + y).map(lambda x: (x[0], x[1]/2)).collectAsMap()
+
+    modularity = calculate_modularity(vertices, betweenness)
+
+    normalized_modularity = modularity/(2*M)
+
+    if normalized_modularity > max_modularity:
+        max_modularity = normalized_modularity
+
+    highest_modularity_graph = [list(vertices)]
+    subgraphs = [highest_modularity_graph]
+
+    num_vertices = len(vertices)
+
+    while len(subgraphs) != num_vertices:
+
+        edges_to_remove = [(node1, node2) for (node1, node2), credit in betweenness.items() if credit == max(betweenness.values())]
+
+        for node1, node2 in edges_to_remove:
+            graph[node1].remove(node2)
+            graph[node2].remove(node1)
+        
+        betweenness = adjacency_list_RDD.flatMap(lambda node: calculate_betweeness(node, graph)).reduceByKey(lambda x,y: x+y).map(lambda x: (x[0], x[1]/2)).collectAsMap()
+
+        subgraphs = find_all_subgraphs(graph)
+
+        subgraphs_rdd = sc.parallelize(subgraphs)
+
+        modularity = (subgraphs_rdd.map(lambda x: calculate_modularity(x, betweenness)).reduce(lambda x,y:x+y))/(2*M)
+
+        highest_modularity_graph, max_modularity = (subgraphs, modularity) if modularity > max_modularity else (highest_modularity_graph, max_modularity)
+
+    best_graph = sc.parallelize(highest_modularity_graph).map(lambda x: sorted(x)).sortBy(lambda x: (len(x), x)).collect()
+
     #TODO: Write this to a txt file
+    write_communities(community_output_file, best_graph)
 
 
-    
-
-    # print(time.time() - start)
+    print(time.time() - start)
